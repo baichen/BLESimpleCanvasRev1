@@ -1,5 +1,8 @@
 package com.example.baichen.blesimplecanvas;
 
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
@@ -10,10 +13,10 @@ import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.os.Handler;
-import android.provider.Settings;
 import android.support.design.widget.FloatingActionButton;
 import android.support.design.widget.Snackbar;
 import android.support.v7.app.AppCompatActivity;
@@ -31,10 +34,12 @@ import com.jjoe64.graphview.series.DataPoint;
 import com.jjoe64.graphview.series.LineGraphSeries;
 import com.jjoe64.graphview.series.PointsGraphSeries;
 
+import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Random;
 
 public class MainActivity extends AppCompatActivity implements View.OnClickListener {
+    private final boolean DEBUG = false;
     private TextView display = null;
 
     // Bluetooth adapters and scan
@@ -65,17 +70,18 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     private long receivedPacketsCount = 0;
     private long receivedBytesCount = 0;
     private int recordPoints = 2000;
+    private int recordData[] = new int[163840];
 
     // GraphView Plots
     private GraphView graph = null;
     private static final int MAX_DATA_POINTS = 1000;
-    private static final int MAX_POINTS_ON_PLOT = 200;
+    private static final int DEFAULT_GRAPHVIEW_WINDOW_LENGTH = 4000;  //
     private LineGraphSeries<DataPoint> mSeries1;
     private PointsGraphSeries<DataPoint> mSeries2;
-    private double graph2LastXValue = 5d;
-    private long StartRecordingTimeMillis = 0;
     private long StartAppTimeMillis = 0;
 
+    // System Notification, debug for now
+    private NotificationManager notificationManager = null;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -116,8 +122,6 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             }
         });
 
-
-
         final Button btn_start = (Button) findViewById( R.id.btn_start );
         btn_start.setOnClickListener( this );
 
@@ -148,12 +152,22 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         // set manual X bounds
         // use a 4 seconds window for data plot
         graph.getViewport().setXAxisBoundsManual(true);
-        graph.getViewport().setMinX(-4000);
+        //graph.getViewport().setMinX(-DEFAULT_GRAPHVIEW_WINDOW_LENGTH);
+        graph.getViewport().setMinX(-100);
         graph.getViewport().setMaxX(0);
         // set manual Y bounds -- assuming 12-bit ADC
         graph.getViewport().setYAxisBoundsManual(true);
         graph.getViewport().setMinY(0);
         graph.getViewport().setMaxY(4096);
+
+        // System Notification
+        notificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        // prepare intent which is triggered if the
+        // notification is selected
+        // Intent intent = new Intent(this, NotificationReceiver.class);
+        // use System.currentTimeMillis() to have a unique ID for the pending intent
+        // PendingIntent pIntent = PendingIntent.getActivity(this, (int) System.currentTimeMillis(), intent, 0);
+        notify("Looks Good. :)");
 
         // Get System Time as Reference
         StartAppTimeMillis = System.currentTimeMillis();
@@ -163,7 +177,6 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     public void onClick(View v) {
         switch (v.getId()) {
             case R.id.btn_start:
-                println("Start Recording!");
                 ScanConnectNotifyRecord();
                 break;
         }
@@ -183,7 +196,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             return;
         }
         // 1.2 search for specific device
-        if(( mBluetoothDevice == null )||( mConnectionState == STATE_DISCONNECTED )) {
+        if(( mBluetoothDevice == null )||( mConnectionState == STATE_DISCONNECTED )||( mBluetoothGatt == null )) {
             ScanBLEDevices();
             return;
         }
@@ -252,6 +265,9 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
                 // Connect to device
                 println("Connect to device");
                 mBluetoothGatt = mBluetoothDevice.connectGatt(getApplicationContext(), false, mGattCallback);
+                // try to refresh the bluetooth cache
+                // this is not working reliably for me, and may not be a good solution. Give up.
+                // refreshDeviceCache( mBluetoothGatt );
             }
         }
     };
@@ -270,8 +286,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             // this will get called anytime you perform a read or write characteristic operation
             byte[] data = characteristic.getValue();
             receivedPacketsCount++;
-            //clearMessageBox();
-            print("#P=" + receivedPacketsCount);
+            elpasedMillisSinceLastNotification.clearMillis();
             runOnUiThread(new GraphViewUpdater(data) );
         }
 
@@ -324,7 +339,6 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
                 if( descriptor.getCharacteristic() == mBluetoothGattCharacteristicAA71 ) {
                     mBluetoothGatt.setCharacteristicNotification(mBluetoothGattCharacteristicAA71, true);
                     println("AA71 Enabled");
-                    //StartRecording(recordPoints);
                 }
                 // never gets here
                 if( descriptor.getCharacteristic() == mBluetoothGattCharacteristicAA72 ) {
@@ -369,10 +383,20 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
      *
      *  *******************************************************************************/
     public void StartRecording( int number_of_points ) {
+        if( DEBUG ) {
+            mSeries1.resetData(generateData(MAX_DATA_POINTS));
+        }
+
         if( mBluetoothGattCharacteristicAA72 == null) {
             println("Object AA72 Not Found.");
             return;
         }
+        if( elpasedMillisSinceLastNotification.getValue() < 1000 ) {
+            println("Please wait for the end of current recording session.");
+            return;
+        }
+
+        println("Start Recording!");
 
         byte[] command = new byte[4];
         command[0] = (byte)(number_of_points & 0xff);
@@ -391,8 +415,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             println("Writing AA72 Init Error." );
         }
         // Log System time.
-        StartRecordingTimeMillis = System.currentTimeMillis();
-        //mSeries1.resetData(generateData(MAX_DATA_POINTS));
+        // StartRecordingTimeMillis = System.currentTimeMillis();
     }
 
     /**********************************************************************************
@@ -441,7 +464,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         }
         @Override
         public void run() {
-            if( display.getText().length() >= 150 ) {
+            if( display.getText().length() >= 9999 ) {
                 display.setText( text );
             } else {
                 display.append(text);
@@ -481,6 +504,132 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     /***********************************************************************************
      *  @BaichenLi
      *
+     * Issue: when CC254x is sending notification to smartphone, if we accidentally press
+     * the button on the screen, and a new start command is sent to the BLE device. Some
+     * error might happen, preventing CC254x from responding to our following commands.
+     *
+     * I don't know if there is any specific data signature to indicate that the data
+     * transmission is finished. So I use a timer to track when the last notification is
+     * received. If it's longer than 1000 ms, we consider there is no on-going recording,
+     * and we allow the program proceed to send commands in StartRecording().
+     *
+     * Whenever a notification arrives at mGattCallback.onCharacteristicChanged(), we want
+     * to reset this variable.
+     ***********************************************************************************/
+    private ElapsedMillis elpasedMillisSinceLastNotification = new ElapsedMillis();
+    private class ElapsedMillis {
+        private long millis = 0;
+        public ElapsedMillis() {
+            millis = System.currentTimeMillis();
+        }
+        public void clearMillis() {
+            millis = System.currentTimeMillis();;
+        }
+        public long getValue() {
+            return (System.currentTimeMillis() - millis);
+        }
+    };
+    /***********************************************************************************
+     *  @BaichenLi
+     *
+     * Issue: 66.7% (2/3) packet loss when pasue & resume the application.
+     * A possible cause is that when exit the program, it is only moved to the background.
+     * The information related to Bluetooth connections are cached somewhere, which might
+     * be problematic when resume the application.
+     *
+     * References:
+     *  (1) http://developer.android.com/training/basics/activity-lifecycle/pausing.html
+     *
+     *  (2) BLE Caching
+     *      https://e2e.ti.com/support/wireless_connectivity/f/538/t/327105
+     *
+     *      The Android stack already does this for you "under the hood";
+     *      i.e. it caches services and characteristic handles the first
+     *      time you connect to a device.  Subsequent connections and calls
+     *      to 'discoverServices' use the cached handles. This behavior can be observed
+     *      using the TI Sniffer.  This caching does not require bonding and the cache
+     *      persists even after the app terminates.  AFAIK, the only way to clear the
+     *      cache is to turn Bluetooth off and back on again.
+     *
+     *  (3) A method to refresh BLE cache
+     *      http://stackoverflow.com/questions/22596951/how-to-programmatically-force-bluetooth-low-energy-service-discovery-on-android
+     *
+     *  (4) People are have the same issue, it's said to be fixed in later Android OS:
+     *      https://code.google.com/p/android/issues/detail?id=64499
+     ***********************************************************************************/
+    @Override
+    public void onPause() {
+        super.onPause();  // Always call the superclass method first
+        notify("onPause() Called");
+    }
+    @Override
+    public void onResume() {
+        super.onResume();
+        notify("onResume() Called");
+        if(mBluetoothGatt != null) {
+            //mBluetoothGatt.disconnect();
+            mBluetoothGatt.close();
+        }
+    }
+    @Override
+    public void onStop() {
+        super.onStop();
+        notify("onStop() Called");
+    }
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        notify("onDestroy() Called");
+        if(mBluetoothGatt != null) {
+            //mBluetoothGatt.disconnect();
+            mBluetoothGatt.close();
+        }
+    }
+
+    /****************************************************************************
+     * @BaichenLi
+     * Comments:
+     * (3) A method to refresh BLE cache
+     *      it doesn't work for me, and may not be a good solution.
+     **************************************************************************/
+    private boolean refreshDeviceCache(BluetoothGatt gatt){
+        try {
+            BluetoothGatt localBluetoothGatt = gatt;
+            Method localMethod = localBluetoothGatt.getClass().getMethod("refresh", new Class[0]);
+            if (localMethod != null) {
+                boolean bool = ((Boolean) localMethod.invoke(localBluetoothGatt, new Object[0])).booleanValue();
+                return bool;
+            }
+        }
+        catch (Exception localException) {
+            println("An exception occured while refreshing device");
+        }
+        return false;
+    }
+    /***********************************************************************************
+     *  @BaichenLi
+     *
+     * for debugging purposes, let's add a simple notifications!
+     *
+     ***********************************************************************************/
+    public void notify(String text) {
+        // build notification
+        // the addAction re-use the same intent to keep the example short
+        Notification appNotification  = new Notification.Builder(this)
+                .setContentTitle("BLE Simple Canvas Notification")
+                .setContentText( text )
+                .setSmallIcon(R.drawable.bell)
+                        //.setContentIntent(pIntent)
+                .setAutoCancel(true)
+                        //.addAction(R.drawable.icon, "Call", pIntent)
+                        //.addAction(R.drawable.icon, "More", pIntent)
+                        //.addAction(R.drawable.icon, "And more", pIntent)
+                .build();
+        notificationManager.notify( 0, appNotification );
+    }
+    /***********************************************************************************
+     *  @BaichenLi
+     *
      * UpdatePlot:
      *  this function will be called whenever it receives a data packet from
      *  the BLE device. We can modify this code to adapt to specific applications.
@@ -493,11 +642,10 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     private double currentXValue = 0;
     private class GraphViewUpdater implements Runnable {
         private byte[] _data_;
-
-        private double recording_time_sec = 0;
         private double recording_time_millis = 0;
         private int packet_id = 0;
         private int packet_data[] = new int[8];
+        private double data_sum = 0.0;
         private double data_average = 0.0;
 
         public GraphViewUpdater(final byte[] data) {
@@ -514,10 +662,10 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             // It appears to me that the following code is the right form.
             // Not sure what is in the first two bytes.
             packet_id = ((_data_[2] & 0x000000FF)<<0)+((_data_[3] & 0x000000FF)<<8);
-            data_average = 0.0;
+            data_sum = 0.0;
             for(int i=0;i<8;i++) {
                 packet_data[ i ] = ((_data_[4+i*2]&0x000000FF) + ((_data_[5+i*2]&0x000000FF)<<8));
-                data_average += packet_data[i];
+                data_sum += packet_data[i];
                 // Calculate the elapsed time in seconds, relative to the time when START command
                 // is sent to the BLE device. Then, append data to mSeries1
                 // recording_time_sec = (System.currentTimeMillis()-StartRecordingTimeMillis)/1000;
@@ -525,18 +673,32 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
                 // mSeries1.appendData( new DataPoint(recording_time_sec,(double)packet_data[i]), true, MAX_DATA_POINTS);
                 // mSeries1.appendData( new DataPoint(currentXValue,(double)packet_data[i]), true, MAX_DATA_POINTS);
             }
-            data_average = data_average / 8;
-            print("Pid="+packet_id);
-            // Maybe we want to update GraphView less frequently, to avoid program lagging
-            // Here, I use the average value & relative system time as 1 sample point
+
+            // [10/18/2015][Baichen Li]
+            // Maybe we want to update GraphView less frequently, to avoid program lagging.
+            // Here, I use the average value & relative system time as 1 sample point.
+            // [10/18/2015][Baichen Li]
+            // According to my tests, it seems that we could go for even higher speed.
+            // The major UI lag happens at updating TextViews, so we want to use print & println
+            // less frequently.
+            data_average = data_sum / 8;
+
             recording_time_millis = (System.currentTimeMillis()-StartAppTimeMillis);
-            recording_time_sec = recording_time_millis/1000;
+            // recording_time_sec = recording_time_millis/1000;
             // Append the data points to mSeries1 & 2. This will update the graph.
-            mSeries1.appendData( new DataPoint(recording_time_millis, data_average), true, MAX_DATA_POINTS);
-            mSeries2.appendData( new DataPoint(recording_time_millis, data_average), true, MAX_DATA_POINTS);
-            // print some information
-            println(" t(s)=" + recording_time_sec);
+            if( !DEBUG ) {
+                mSeries1.appendData(new DataPoint(recording_time_millis, data_average), true, MAX_DATA_POINTS);
+                mSeries2.appendData(new DataPoint(recording_time_millis, data_average), true, MAX_DATA_POINTS);
+            } else {
+                mSeries1.appendData(new DataPoint((double)packet_id, data_average), true, MAX_DATA_POINTS);
+                mSeries2.appendData(new DataPoint((double)packet_id, data_average), true, MAX_DATA_POINTS);
+            }
+            // print some information to users
+            // At current highest speed,
+            if( receivedPacketsCount % 10 == 0 ) {
+                println( "Pcnt+10, Pid="+packet_id );
+            }
+            //println(" t(s)=" + recording_time_sec);
         }
     }
-
 }
