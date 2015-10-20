@@ -39,7 +39,6 @@ import java.util.List;
 import java.util.Random;
 
 public class MainActivity extends AppCompatActivity implements View.OnClickListener {
-    private final boolean DEBUG = false;
     private TextView display = null;
 
     // Bluetooth adapters and scan
@@ -70,7 +69,8 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     private long receivedPacketsCount = 0;
     private long receivedBytesCount = 0;
     private int recordPoints = 2000;
-    private int recordData[] = new int[163840];
+    //private int recordData[] = new int[163840];
+    //private int recordDataPos = 0;
 
     // GraphView Plots
     private GraphView graph = null;
@@ -152,8 +152,8 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         // set manual X bounds
         // use a 4 seconds window for data plot
         graph.getViewport().setXAxisBoundsManual(true);
-        //graph.getViewport().setMinX(-DEFAULT_GRAPHVIEW_WINDOW_LENGTH);
-        graph.getViewport().setMinX(-100);
+        graph.getViewport().setMinX(-DEFAULT_GRAPHVIEW_WINDOW_LENGTH);
+        //graph.getViewport().setMinX(-100);
         graph.getViewport().setMaxX(0);
         // set manual Y bounds -- assuming 12-bit ADC
         graph.getViewport().setYAxisBoundsManual(true);
@@ -284,10 +284,12 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         @Override
         public void onCharacteristicChanged(BluetoothGatt gatt, final BluetoothGattCharacteristic characteristic) {
             // this will get called anytime you perform a read or write characteristic operation
-            byte[] data = characteristic.getValue();
+            byte[] src_data = characteristic.getValue();
+            //System.arraycopy(src_data,0,recordData, recordDataPos, 20 );
+            //recordDataPos += 20;
             receivedPacketsCount++;
             elpasedMillisSinceLastNotification.clearMillis();
-            runOnUiThread(new GraphViewUpdater(data) );
+            runOnUiThread(new GraphViewUpdater(src_data, receivedPacketsCount, System.currentTimeMillis()) );
         }
 
         @Override
@@ -383,9 +385,9 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
      *
      *  *******************************************************************************/
     public void StartRecording( int number_of_points ) {
-        if( DEBUG ) {
-            mSeries1.resetData(generateData(MAX_DATA_POINTS));
-        }
+        //graph.getViewport().setMinX(-100);
+        //graph.getViewport().setMaxX(0);
+        //mSeries1.resetData(generateData(MAX_DATA_POINTS));
 
         if( mBluetoothGattCharacteristicAA72 == null) {
             println("Object AA72 Not Found.");
@@ -395,6 +397,10 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             println("Please wait for the end of current recording session.");
             return;
         }
+
+        // initialize buffer
+        // recordData[]
+        // recordDataPos = 0;
 
         println("Start Recording!");
 
@@ -464,7 +470,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         }
         @Override
         public void run() {
-            if( display.getText().length() >= 9999 ) {
+            if( display.getText().toString().split("\n").length >= 10 ) {    // count 10 lines
                 display.setText( text );
             } else {
                 display.append(text);
@@ -492,7 +498,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         Random mRand = new Random();
         DataPoint[] values = new DataPoint[count];
         for (int i=0; i<count; i++) {
-            double x = (i-count)/1000;
+            double x = (i-count-1)/1000;
             double f = mRand.nextDouble()*0.15+0.3;
             //double y = Math.sin(i*f+2) + mRand.nextDouble()*0.3;
             double y = 0;
@@ -630,6 +636,19 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     /***********************************************************************************
      *  @BaichenLi
      *
+     * Data Array, so runOnUiThread is non-blocking, which means there is a possibility
+     * for it to be invoked for multiple times. Then, mis-align might happen for data.
+     *
+     * So maybe we want to log all the data in the app.
+     *      1. time packet is received
+     *      2. packet data
+     *      3. save data to local file
+     ***********************************************************************************/
+    public class SomeDataTypeNotImplemented {}
+
+    /***********************************************************************************
+     *  @BaichenLi
+     *
      * UpdatePlot:
      *  this function will be called whenever it receives a data packet from
      *  the BLE device. We can modify this code to adapt to specific applications.
@@ -647,9 +666,12 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
         private int packet_data[] = new int[8];
         private double data_sum = 0.0;
         private double data_average = 0.0;
-
-        public GraphViewUpdater(final byte[] data) {
+        private long totalPacketCount = 0;
+        private long currentSystemTimeMillis = 0;
+        public GraphViewUpdater(final byte[] data, final long receivedPacketsCount, final long currentSystemTime) {
             _data_ = data;
+            totalPacketCount = receivedPacketsCount;
+            currentSystemTimeMillis = currentSystemTime;
         }
         @Override
         public void run() {
@@ -683,10 +705,14 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             // less frequently.
             data_average = data_sum / 8;
 
-            recording_time_millis = (System.currentTimeMillis()-StartAppTimeMillis);
+            // We should not be using System.currentTimeMillis() here, because this class
+            // will be invoked by runOnUiThread(), which is a non-blocking function.
+            // When the data transmission rate is high, System.currentTimeMillis() will be different
+            // from the time this class being created. So I passed a variable to the constructor.
+            recording_time_millis = ( currentSystemTimeMillis - StartAppTimeMillis );
             // recording_time_sec = recording_time_millis/1000;
             // Append the data points to mSeries1 & 2. This will update the graph.
-            if( !DEBUG ) {
+            if( true ) {
                 mSeries1.appendData(new DataPoint(recording_time_millis, data_average), true, MAX_DATA_POINTS);
                 mSeries2.appendData(new DataPoint(recording_time_millis, data_average), true, MAX_DATA_POINTS);
             } else {
@@ -695,7 +721,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
             }
             // print some information to users
             // At current highest speed,
-            if( receivedPacketsCount % 10 == 0 ) {
+            if( totalPacketCount % 10 == 0 ) {
                 println( "Pcnt+10, Pid="+packet_id );
             }
             //println(" t(s)=" + recording_time_sec);
